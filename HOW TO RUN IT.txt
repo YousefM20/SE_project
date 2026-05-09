@@ -1,0 +1,16 @@
+HOW TO RUN IT: 
+OPEN FRONTEND IN TERMINAL:  
+npm install
+npm run dev
+
+OPEN BACKEND IN ANOTHER TERMINAL: 
+docker compose up --build
+mvn clean install 
+docker-compose up -d
+
+docker exec -it artauction-postgres psql -U artauction // for database
+
+ON pgAdmin:
+database : 
+Username: artauction
+Password: artauction123
