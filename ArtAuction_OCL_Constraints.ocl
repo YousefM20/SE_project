@@ -1,0 +1,619 @@
+
+--  This file defines all formal OCL constraints for the ArtAuction microservices
+--  system. Constraints are grouped by class and cover:
+--    • Invariants  (inv)  — conditions that must ALWAYS be true
+--    • Preconditions  (pre)  — conditions that must be true BEFORE an operation
+--    • Postconditions (post) — conditions that must be true AFTER an operation
+--
+--  Classes covered:
+--    User · Artwork · Auction · Bid · Notification · WatchlistItem
+-- =============================================================================
+
+
+-- =============================================================================
+-- PACKAGE: com.artauction
+-- =============================================================================
+package com.artauction
+
+
+-- =============================================================================
+--  1. CLASS: User
+--     Service: user-service  |  Table: users
+-- =============================================================================
+context User
+
+  -- INV-U1: Email must not be null or empty and must follow email format
+  inv EmailNotEmpty:
+    self.email <> null and self.email.size() > 0
+    and self.email.matches('[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}')
+
+  -- INV-U2: Full name must not be null or blank
+  inv FullNameNotBlank:
+    self.fullName <> null and self.fullName.size() > 0
+
+  -- INV-U3: Password must be stored as a BCrypt hash (non-empty)
+  inv PasswordNotEmpty:
+    self.password <> null and self.password.size() >= 6
+
+  -- INV-U4: Role must be one of the four valid roles
+  inv ValidRole:
+    self.role = Role::ADMIN
+    or self.role = Role::EMPLOYEE
+    or self.role = Role::ARTIST
+    or self.role = Role::BUYER
+
+  -- INV-U5: A user that is not approved cannot be active in the system
+  inv ApprovalConsistency:
+    (not self.approved) implies (not self.isActive())
+
+  -- INV-U6: Account creation date must not be in the future
+  inv CreatedAtNotFuture:
+    self.createdAt <= LocalDateTime::now()
+
+  -- INV-U7: Email must be unique across all users (enforced at DB level)
+  inv UniqueEmail:
+    User.allInstances()->isUnique(u | u.email)
+
+  -- ── Operations ────────────────────────────────────────────────────────────
+
+  -- OPERATION: register(fullName, email, password, role)
+  context User::register(fullName: String, email: String,
+                          password: String, role: Role) : User
+
+    -- PRE-U1: Email must not already be registered
+    pre EmailUnique:
+      User.allInstances()->forAll(u | u.email <> email)
+
+    -- PRE-U2: Password must be at least 6 characters
+    pre PasswordLength:
+      password.size() >= 6
+
+    -- PRE-U3: Full name must not be blank
+    pre FullNameProvided:
+      fullName <> null and fullName.size() > 0
+
+    -- PRE-U4: Email format must be valid
+    pre ValidEmailFormat:
+      email.matches('[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}')
+
+    -- POST-U1: New user is saved and pending approval (approved = false)
+    post UserCreatedPending:
+      result.approved = false
+
+    -- POST-U2: Password is stored encoded (not in plain text)
+    post PasswordEncoded:
+      result.password <> password
+
+    -- POST-U3: Role is assigned correctly
+    post RoleAssigned:
+      result.role = role
+
+    -- POST-U4: User count increased by exactly one
+    post UserCountIncreased:
+      User.allInstances()->size() = User.allInstances@pre()->size() + 1
+
+
+  -- OPERATION: login(email, password)
+  context User::login(email: String, password: String) : String
+
+    -- PRE-U5: User with this email must exist
+    pre UserExists:
+      User.allInstances()->exists(u | u.email = email)
+
+    -- PRE-U6: User must be approved before they can log in
+    pre UserApproved:
+      User.allInstances()->select(u | u.email = email)
+          ->forAll(u | u.approved = true)
+
+    -- PRE-U7: User must be active
+    pre UserActive:
+      User.allInstances()->select(u | u.email = email)
+          ->forAll(u | u.isActive() = true)
+
+    -- POST-U5: Returns a non-empty JWT token string
+    post TokenReturned:
+      result <> null and result.size() > 0
+
+
+  -- OPERATION: approveUser(userId)
+  context User::approveUser(userId: String) : User
+
+    -- PRE-U8: Caller must be ADMIN or EMPLOYEE
+    pre CallerIsAdmin:
+      self.role = Role::ADMIN or self.role = Role::EMPLOYEE
+
+    -- PRE-U9: Target user must exist
+    pre TargetUserExists:
+      User.allInstances()->exists(u | u.id = userId)
+
+    -- POST-U6: Target user is now approved
+    post UserApprovedAfter:
+      User.allInstances()->select(u | u.id = userId)
+          ->forAll(u | u.approved = true)
+
+
+-- =============================================================================
+--  2. CLASS: Artwork
+--     Service: auction-service  |  Table: artworks
+-- =============================================================================
+context Artwork
+
+  -- INV-A1: Title must not be null or blank
+  inv TitleNotBlank:
+    self.title <> null and self.title.size() > 0
+
+  -- INV-A2: Medium must not be null or blank
+  inv MediumNotBlank:
+    self.medium <> null and self.medium.size() > 0
+
+  -- INV-A3: Starting price must be greater than zero
+  inv StartingPricePositive:
+    self.startingPrice > 0.00
+
+  -- INV-A4: Artist ID must not be null
+  inv ArtistIdNotNull:
+    self.artistId <> null and self.artistId.size() > 0
+
+  -- INV-A5: Status must be one of the valid artwork statuses
+  inv ValidStatus:
+    self.status = ArtworkStatus::AVAILABLE
+    or self.status = ArtworkStatus::IN_AUCTION
+    or self.status = ArtworkStatus::SOLD
+
+  -- INV-A6: Year created, if provided, must be a valid historical year
+  inv ValidYearCreated:
+    self.yearCreated <> null implies
+      (self.yearCreated >= 1000
+       and self.yearCreated <= LocalDateTime::now().getYear())
+
+  -- INV-A7: An artwork IN_AUCTION must have exactly one active auction
+  inv InAuctionHasActiveAuction:
+    self.status = ArtworkStatus::IN_AUCTION implies
+      Auction.allInstances()->select(a |
+        a.artworkId = self.id and a.status = AuctionStatus::ACTIVE)->size() = 1
+
+  -- INV-A8: A SOLD artwork must have exactly one ENDED auction
+  inv SoldHasEndedAuction:
+    self.status = ArtworkStatus::SOLD implies
+      Auction.allInstances()->select(a |
+        a.artworkId = self.id and a.status = AuctionStatus::ENDED)->size() >= 1
+
+  -- ── Operations ────────────────────────────────────────────────────────────
+
+  -- OPERATION: createArtwork(request, artistId)
+  context Artwork::createArtwork(title: String, medium: String,
+                                  startingPrice: Real, artistId: String) : Artwork
+
+    -- PRE-A1: Caller must be a registered and approved artist
+    pre CallerIsApprovedArtist:
+      User.allInstances()->exists(u |
+        u.id = artistId
+        and u.role = Role::ARTIST
+        and u.approved = true)
+
+    -- PRE-A2: Title must not be blank
+    pre TitleProvided:
+      title <> null and title.size() > 0
+
+    -- PRE-A3: Medium must not be blank
+    pre MediumProvided:
+      medium <> null and medium.size() > 0
+
+    -- PRE-A4: Starting price must be positive
+    pre PricePositive:
+      startingPrice > 0.00
+
+    -- POST-A1: Artwork is saved with AVAILABLE status
+    post ArtworkAvailable:
+      result.status = ArtworkStatus::AVAILABLE
+
+    -- POST-A2: Artwork is owned by the calling artist
+    post ArtworkOwnedByArtist:
+      result.artistId = artistId
+
+    -- POST-A3: Starting price matches the provided value
+    post PriceSet:
+      result.startingPrice = startingPrice
+
+
+-- =============================================================================
+--  3. CLASS: Auction
+--     Service: auction-service  |  Table: auctions
+-- =============================================================================
+context Auction
+
+  -- INV-AU1: End time must be strictly after start time
+  inv EndAfterStart:
+    self.endTime > self.startTime
+
+  -- INV-AU2: Current price must be greater than or equal to starting price
+  inv CurrentPriceGteStarting:
+    self.currentPrice >= self.startingPrice
+
+  -- INV-AU3: Total bids must be non-negative
+  inv TotalBidsNonNegative:
+    self.totalBids >= 0
+
+  -- INV-AU4: Status must be a valid auction status
+  inv ValidStatus:
+    self.status = AuctionStatus::SCHEDULED
+    or self.status = AuctionStatus::ACTIVE
+    or self.status = AuctionStatus::ENDED
+    or self.status = AuctionStatus::CANCELLED
+
+  -- INV-AU5: A winner can only exist if the auction has ENDED
+  inv WinnerOnlyWhenEnded:
+    self.winnerId <> null implies self.status = AuctionStatus::ENDED
+
+  -- INV-AU6: An ACTIVE auction must not have passed its end time
+  inv ActiveAuctionNotExpired:
+    self.status = AuctionStatus::ACTIVE implies
+      self.endTime > LocalDateTime::now()
+
+  -- INV-AU7: Reserve price, if set, must be greater than starting price
+  inv ReservePriceValid:
+    self.reservePrice <> null implies
+      self.reservePrice > self.startingPrice
+
+  -- INV-AU8: Total bids must equal the number of bids recorded for this auction
+  inv TotalBidsMatchesRecords:
+    self.totalBids =
+      Bid.allInstances()->select(b | b.auctionId = self.id)->size()
+
+  -- INV-AU9: Artist cannot have two active auctions for the same artwork
+  inv OneActiveAuctionPerArtwork:
+    Auction.allInstances()->select(a |
+      a.artworkId = self.artworkId
+      and a.status = AuctionStatus::ACTIVE)->size() <= 1
+
+  -- ── Operations ────────────────────────────────────────────────────────────
+
+  -- OPERATION: createAuction(request, artistId)
+  context Auction::createAuction(artworkId: String, startTime: LocalDateTime,
+                                  endTime: LocalDateTime, artistId: String) : Auction
+
+    -- PRE-AU1: Artwork must exist
+    pre ArtworkExists:
+      Artwork.allInstances()->exists(a | a.id = artworkId)
+
+    -- PRE-AU2: Caller must own the artwork
+    pre ArtistOwnsArtwork:
+      Artwork.allInstances()->select(a | a.id = artworkId)
+          ->forAll(a | a.artistId = artistId)
+
+    -- PRE-AU3: Artwork must be AVAILABLE (not already in auction or sold)
+    pre ArtworkAvailable:
+      Artwork.allInstances()->select(a | a.id = artworkId)
+          ->forAll(a | a.status = ArtworkStatus::AVAILABLE)
+
+    -- PRE-AU4: End time must be after start time
+    pre ValidTimeRange:
+      endTime > startTime
+
+    -- PRE-AU5: End time must be in the future
+    pre EndTimeInFuture:
+      endTime > LocalDateTime::now()
+
+    -- POST-AU1: Auction is saved with correct initial status
+    post StatusSetCorrectly:
+      (startTime <= LocalDateTime::now() implies result.status = AuctionStatus::ACTIVE)
+      and
+      (startTime > LocalDateTime::now() implies result.status = AuctionStatus::SCHEDULED)
+
+    -- POST-AU2: Current price initialised to artwork's starting price
+    post CurrentPriceInitialised:
+      result.currentPrice = result.startingPrice
+
+    -- POST-AU3: Total bids initialised to zero
+    post TotalBidsZero:
+      result.totalBids = 0
+
+    -- POST-AU4: If auction starts immediately, artwork status changes to IN_AUCTION
+    post ArtworkStatusUpdatedIfActive:
+      result.status = AuctionStatus::ACTIVE implies
+        Artwork.allInstances()->select(a | a.id = artworkId)
+            ->forAll(a | a.status = ArtworkStatus::IN_AUCTION)
+
+
+  -- OPERATION: cancelAuction(auctionId, requesterId)
+  context Auction::cancelAuction(auctionId: String, requesterId: String) : Auction
+
+    -- PRE-AU6: Auction must not already be ended
+    pre AuctionNotEnded:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | a.status <> AuctionStatus::ENDED)
+
+    -- PRE-AU7: Requester must be the artist owner or an ADMIN/EMPLOYEE
+    pre RequesterAuthorised:
+      Auction.allInstances()->select(a | a.id = auctionId)->forAll(a |
+        a.artistId = requesterId
+        or User.allInstances()->exists(u |
+             u.id = requesterId
+             and (u.role = Role::ADMIN or u.role = Role::EMPLOYEE)))
+
+    -- POST-AU5: Auction status becomes CANCELLED
+    post AuctionCancelled:
+      result.status = AuctionStatus::CANCELLED
+
+    -- POST-AU6: Artwork is returned to AVAILABLE status
+    post ArtworkReturned:
+      Artwork.allInstances()->select(a | a.id = result.artworkId)
+          ->forAll(a | a.status = ArtworkStatus::AVAILABLE)
+
+
+-- =============================================================================
+--  4. CLASS: Bid
+--     Service: auction-service  |  Table: bids
+-- =============================================================================
+context Bid
+
+  -- INV-B1: Amount must be strictly greater than zero
+  inv AmountPositive:
+    self.amount > 0.00
+
+  -- INV-B2: Auction ID must not be null
+  inv AuctionIdNotNull:
+    self.auctionId <> null and self.auctionId.size() > 0
+
+  -- INV-B3: Bidder ID must not be null
+  inv BidderIdNotNull:
+    self.bidderId <> null and self.bidderId.size() > 0
+
+  -- INV-B4: Bid amount must be greater than the auction's current price
+  --         at the time the bid was placed
+  inv BidExceedsCurrentPrice:
+    Auction.allInstances()->select(a | a.id = self.auctionId)
+        ->forAll(a | self.amount > a.startingPrice)
+
+  -- INV-B5: A bidder cannot bid on their own artwork
+  inv BidderNotArtist:
+    Auction.allInstances()->select(a | a.id = self.auctionId)
+        ->forAll(a | a.artistId <> self.bidderId)
+
+  -- INV-B6: Placement timestamp must not be in the future
+  inv PlacedAtNotFuture:
+    self.placedAt <= LocalDateTime::now()
+
+  -- ── Operations ────────────────────────────────────────────────────────────
+
+  -- OPERATION: placeBid(auctionId, amount, bidderId)
+  context Bid::placeBid(auctionId: String, amount: Real,
+                         bidderId: String) : Bid
+
+    -- PRE-B1: Auction must exist
+    pre AuctionExists:
+      Auction.allInstances()->exists(a | a.id = auctionId)
+
+    -- PRE-B2: Auction must be ACTIVE
+    pre AuctionIsActive:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | a.status = AuctionStatus::ACTIVE)
+
+    -- PRE-B3: Auction must not have passed its end time
+    pre AuctionNotExpired:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | a.endTime > LocalDateTime::now())
+
+    -- PRE-B4: Bid amount must be strictly greater than the current auction price
+    pre BidHigherThanCurrent:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | amount > a.currentPrice)
+
+    -- PRE-B5: Bidder must not be the artist who owns the auction artwork
+    pre BidderIsNotArtist:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | a.artistId <> bidderId)
+
+    -- PRE-B6: Bidder must be a registered and approved BUYER
+    pre BidderIsBuyer:
+      User.allInstances()->exists(u |
+        u.id = bidderId
+        and u.role = Role::BUYER
+        and u.approved = true)
+
+    -- PRE-B7: Amount must be greater than zero
+    pre AmountPositive:
+      amount > 0.00
+
+    -- POST-B1: Bid is saved with correct data
+    post BidSaved:
+      result.auctionId = auctionId
+      and result.bidderId = bidderId
+      and result.amount = amount
+
+    -- POST-B2: Auction's current price is updated to the new bid amount
+    post AuctionPriceUpdated:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | a.currentPrice = amount)
+
+    -- POST-B3: Auction's total bid count is incremented by one
+    post TotalBidsIncremented:
+      Auction.allInstances()->select(a | a.id = auctionId)
+          ->forAll(a | a.totalBids = a@pre.totalBids + 1)
+
+    -- POST-B4: Bid placement timestamp is set
+    post PlacedAtSet:
+      result.placedAt <> null
+
+
+-- =============================================================================
+--  5. CLASS: Notification
+--     Service: notification-service  |  Table: notifications
+-- =============================================================================
+context Notification
+
+  -- INV-N1: Type must not be null or empty
+  inv TypeNotEmpty:
+    self.type <> null and self.type.size() > 0
+
+  -- INV-N2: Type must be one of the recognised event types
+  inv ValidType:
+    Set{'WELCOME', 'LOGIN', 'ACCOUNT_APPROVED',
+        'AUCTION_CREATED', 'NEW_BID', 'AUCTION_ENDED', 'GENERAL'}
+        ->includes(self.type)
+
+  -- INV-N3: Message must not be null or empty
+  inv MessageNotEmpty:
+    self.message <> null and self.message.size() > 0
+
+  -- INV-N4: Message length must not exceed 1000 characters
+  inv MessageMaxLength:
+    self.message.size() <= 1000
+
+  -- INV-N5: Creation timestamp must not be in the future
+  inv CreatedAtNotFuture:
+    self.createdAt <= LocalDateTime::now()
+
+  -- INV-N6: Read flag must have a defined boolean value (not null)
+  inv ReadFlagDefined:
+    self.read = true or self.read = false
+
+  -- ── Operations ────────────────────────────────────────────────────────────
+
+  -- OPERATION: createFromMap(payload)
+  context Notification::createFromMap(payload: Map(String, String)) : Notification
+
+    -- PRE-N1: Payload must contain a non-empty 'type' key
+    pre PayloadHasType:
+      payload->includes('type')
+      and payload->at('type').size() > 0
+
+    -- PRE-N2: Payload must contain a non-empty 'message' key
+    pre PayloadHasMessage:
+      payload->includes('message')
+      and payload->at('message').size() > 0
+
+    -- POST-N1: Notification is saved with read = false by default
+    post SavedAsUnread:
+      result.read = false
+
+    -- POST-N2: Type and message are set from payload
+    post DataMapped:
+      result.type = payload->at('type')
+      and result.message = payload->at('message')
+
+
+  -- OPERATION: markAsRead(notificationId)
+  context Notification::markAsRead(notificationId: String) : Notification
+
+    -- PRE-N3: Notification with this ID must exist
+    pre NotificationExists:
+      Notification.allInstances()->exists(n | n.id = notificationId)
+
+    -- POST-N3: Notification is now marked as read
+    post MarkedRead:
+      result.read = true
+
+    -- POST-N4: Only the read flag changed — all other fields are unchanged
+    post OnlyReadChanged:
+      result.id        = result@pre.id
+      and result.type    = result@pre.type
+      and result.message = result@pre.message
+      and result.userId  = result@pre.userId
+
+
+-- =============================================================================
+--  6. CLASS: WatchlistItem
+--     Service: watchlist-service  |  Table: watchlist_items
+-- =============================================================================
+context WatchlistItem
+
+  -- INV-W1: User ID must not be null
+  inv UserIdNotNull:
+    self.userId <> null and self.userId.size() > 0
+
+  -- INV-W2: Target ID must not be null
+  inv TargetIdNotNull:
+    self.targetId <> null and self.targetId.size() > 0
+
+  -- INV-W3: Target type must be ARTWORK or AUCTION
+  inv ValidTargetType:
+    self.targetType = TargetType::ARTWORK
+    or self.targetType = TargetType::AUCTION
+
+  -- INV-W4: A user cannot watch the same target more than once
+  --         (unique constraint: userId + targetId + targetType)
+  inv NoDuplicateWatchlistEntry:
+    WatchlistItem.allInstances()->isUnique(w |
+      Tuple { uid = w.userId, tid = w.targetId, ttype = w.targetType })
+
+  -- INV-W5: Added timestamp must not be in the future
+  inv AddedAtNotFuture:
+    self.addedAt <= LocalDateTime::now()
+
+  -- ── Operations ────────────────────────────────────────────────────────────
+
+  -- OPERATION: addToWatchlist(userId, targetId, targetType)
+  context WatchlistItem::addToWatchlist(userId: String, targetId: String,
+                                         targetType: TargetType) : WatchlistItem
+
+    -- PRE-W1: User must be registered and approved
+    pre UserApproved:
+      User.allInstances()->exists(u |
+        u.id = userId and u.approved = true)
+
+    -- PRE-W2: Item must not already be in user's watchlist
+    pre NotAlreadyWatched:
+      not WatchlistItem.allInstances()->exists(w |
+        w.userId = userId
+        and w.targetId = targetId
+        and w.targetType = targetType)
+
+    -- POST-W1: WatchlistItem is saved with correct data
+    post ItemSaved:
+      result.userId     = userId
+      and result.targetId   = targetId
+      and result.targetType = targetType
+
+    -- POST-W2: Total watchlist size for user increased by one
+    post WatchlistGrew:
+      WatchlistItem.allInstances()->select(w | w.userId = userId)->size()
+      = WatchlistItem.allInstances@pre()->select(w | w.userId = userId)->size() + 1
+
+
+  -- OPERATION: removeFromWatchlist(userId, targetId, targetType)
+  context WatchlistItem::removeFromWatchlist(userId: String, targetId: String,
+                                              targetType: TargetType) : void
+
+    -- PRE-W3: The item must exist in the user's watchlist
+    pre ItemExists:
+      WatchlistItem.allInstances()->exists(w |
+        w.userId = userId
+        and w.targetId = targetId
+        and w.targetType = targetType)
+
+    -- POST-W3: Item is removed — watchlist size decreased by one
+    post WatchlistShrank:
+      WatchlistItem.allInstances()->select(w | w.userId = userId)->size()
+      = WatchlistItem.allInstances@pre()->select(w | w.userId = userId)->size() - 1
+
+    -- POST-W4: The specific item no longer exists
+    post ItemGone:
+      not WatchlistItem.allInstances()->exists(w |
+        w.userId = userId
+        and w.targetId = targetId
+        and w.targetType = targetType)
+
+
+-- =============================================================================
+-- END PACKAGE
+-- =============================================================================
+endpackage
+
+
+-- =============================================================================
+--  SUMMARY TABLE
+-- =============================================================================
+--
+--  Class          │ Invariants │ Preconditions │ Postconditions │ Total
+--  ───────────────┼────────────┼───────────────┼────────────────┼──────
+--  User           │     7      │      9        │       6        │  22
+--  Artwork        │     8      │      4        │       3        │  15
+--  Auction        │     9      │      9        │       7        │  25
+--  Bid            │     6      │      7        │       4        │  17
+--  Notification   │     6      │      4        │       4        │  14
+--  WatchlistItem  │     5      │      5        │       5        │  15
+--  ───────────────┼────────────┼───────────────┼────────────────┼──────
+--  TOTAL          │    41      │     38        │      29        │ 108
+--
+-- =============================================================================

@@ -1,0 +1,65 @@
+http://localhost:8761
+
+
+Register:
+
+Go to http://localhost:3000/register
+Fill in name, email, password, select "Bidder"
+
+Click Create Account → you should be redirected to /
+Check notification: GET http://localhost:8080/api/notifications/my 
+(you'll need the token from login)
+
+Login:
+
+Go to http://localhost:3000/login, enter credentials
+On success, redirected to home. A LOGIN notification is stored.
+
+Place a Bid (requires an active auction):
+
+Register as an Artist (then if isApproved is a problem for testing, directly set approved=true in DB)
+
+As Artist: 
+Create an Artwork (/create-artwork) then Create an Auction (/create-auction)
+
+Log in as a Buyer (different account)
+Browse to http://localhost:3000/auctions,
+
+ click the active auction
+Enter a bid amount > current price and click "Place Bid"
+Bid history updates instantly via refresh() hook
+
+Step 4 — Test via Postman
+1. Register
+POST http://localhost:8080/api/auth/register
+
+Body: { "fullName":"Ahmed Ali", "email":"ahmed@test.com", "password":"pass123", "role":"BUYER" }
+
+
+→ Returns { token, userId, email, fullName, role }
+
+
+2. Login
+POST http://localhost:8080/api/auth/login
+
+Body: { "email":"ahmed@test.com", "password":"pass123" }
+
+
+→ Returns { token, ... }  — save this token
+
+
+3. Get My Notifications (verifies the fix)
+GET http://localhost:8080/api/notifications/my
+
+Headers: Authorization: Bearer <token>
+
+→ Should return [{ type:"LOGIN", message:"You have successfully logged in..." }, { type:"WELCOME", ... }]
+
+
+4. Place a Bid (need an active auctionId first)
+POST http://localhost:8080/api/bids/auction/{auctionId}
+
+Headers: Authorization: Bearer <BUYER token>
+
+Body: { "amount": 550.00 }
+→ Returns BidDto with your bid details
